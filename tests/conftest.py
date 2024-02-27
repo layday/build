@@ -62,7 +62,7 @@ def is_integration(item):
 
 @pytest.fixture()
 def local_pip(monkeypatch):
-    monkeypatch.setattr(build.env, '_valid_global_pip', lambda: None)
+    monkeypatch.setattr(build.env, '_has_valid_outer_pip', lambda: None)
 
 
 @pytest.fixture(scope='session', autouse=True)
@@ -116,7 +116,7 @@ def tmp_dir():
 
 @pytest.fixture(autouse=True)
 def force_venv(mocker):
-    mocker.patch.object(build.env, '_should_use_virtualenv', lambda: False)
+    mocker.patch.object(build.env, '_has_virtualenv', lambda: False)
 
 
 def pytest_report_header() -> str:

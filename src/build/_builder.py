@@ -1,22 +1,21 @@
-# SPDX-License-Identifier: MIT
-
 from __future__ import annotations
 
 import contextlib
 import difflib
-import logging
 import os
 import subprocess
 import sys
+import typing
 import warnings
 import zipfile
 
 from collections.abc import Iterator
-from typing import Any, Mapping, Sequence, TypeVar
+from typing import Any, Mapping, Sequence
 
 import pyproject_hooks
 
-from . import env
+from . import _ctx, _util
+from . import env as _env
 from ._compat import tomllib
 from ._exceptions import (
     BuildBackendException,
@@ -24,20 +23,17 @@ from ._exceptions import (
     BuildSystemTableValidationError,
     TypoWarning,
 )
-from ._types import ConfigSettings, Distribution, StrPath, SubprocessRunner
-from ._util import check_dependency, parse_wheel_filename
+from ._types import ConfigSettings, Distribution, StrPath
 
 
-_TProjectBuilder = TypeVar('_TProjectBuilder', bound='ProjectBuilder')
+if typing.TYPE_CHECKING:
+    from typing_extensions import Self
 
 
 _DEFAULT_BACKEND = {
     'build-backend': 'setuptools.build_meta:__legacy__',
     'requires': ['setuptools >= 40.8.0'],
 }
-
-
-_logger = logging.getLogger(__name__)
 
 
 def _find_typo(dictionary: Mapping[str, str], expected: str) -> None:
@@ -50,7 +46,7 @@ def _find_typo(dictionary: Mapping[str, str], expected: str) -> None:
             )
 
 
-def _validate_source_directory(source_dir: StrPath) -> None:
+def _validate_source_dir(source_dir: str) -> None:
     if not os.path.isdir(source_dir):
         msg = f'Source {source_dir} is not a directory'
         raise BuildException(msg)
@@ -119,8 +115,12 @@ def _parse_build_system_table(pyproject_toml: Mapping[str, Any]) -> Mapping[str,
     return build_system_table
 
 
-def _wrap_subprocess_runner(runner: SubprocessRunner, env: env.IsolatedEnv) -> SubprocessRunner:
-    def _invoke_wrapped_runner(cmd: Sequence[str], cwd: str | None, extra_environ: Mapping[str, str] | None) -> None:
+def _wrap_subprocess_runner(
+    runner: pyproject_hooks.SubprocessRunner, env: _env.IsolatedEnv
+) -> pyproject_hooks.SubprocessRunner:
+    def _invoke_wrapped_runner(
+        cmd: Sequence[str], cwd: str | None = None, extra_environ: Mapping[str, str] | None = None
+    ) -> None:
         runner(cmd, cwd, {**(env.make_extra_environ() or {}), **(extra_environ or {})})
 
     return _invoke_wrapped_runner
@@ -135,51 +135,35 @@ class ProjectBuilder:
         self,
         source_dir: StrPath,
         python_executable: str = sys.executable,
-        runner: SubprocessRunner = pyproject_hooks.default_subprocess_runner,
+        runner: pyproject_hooks.SubprocessRunner = pyproject_hooks.default_subprocess_runner,
     ) -> None:
         """
-        :param source_dir: The source directory
-        :param python_executable: The python executable where the backend lives
-        :param runner: Runner for backend subprocesses
-
-        The ``runner``, if provided, must accept the following arguments:
-
-        - ``cmd``: a list of strings representing the command and arguments to
-          execute, as would be passed to e.g. 'subprocess.check_call'.
-        - ``cwd``: a string representing the working directory that must be
-          used for the subprocess. Corresponds to the provided source_dir.
-        - ``extra_environ``: a dict mapping environment variable names to values
-          which must be set for the subprocess execution.
-
-        The default runner simply calls the backend hooks in a subprocess, writing backend output
-        to stdout/stderr.
+        :param source_dir: Project source directory
+        :param python_executable: Python executable to build the project against
+        :param runner: Subprocess runner for invoking build hooks. Refer to
+            the :ref:`pyproject-hooks documentation <pyproject-hooks:subprocess runners>`.
         """
-        self._source_dir: str = os.path.abspath(source_dir)
-        _validate_source_directory(source_dir)
-
+        self._source_dir = os.path.abspath(source_dir)
+        _validate_source_dir(self._source_dir)
         self._python_executable = python_executable
-        self._runner = runner
-
-        pyproject_toml_path = os.path.join(source_dir, 'pyproject.toml')
-        self._build_system = _parse_build_system_table(_read_pyproject_toml(pyproject_toml_path))
-
-        self._backend = self._build_system['build-backend']
-
+        self._build_system = _parse_build_system_table(
+            _read_pyproject_toml(os.path.join(source_dir, 'pyproject.toml')),
+        )
         self._hook = pyproject_hooks.BuildBackendHookCaller(
             self._source_dir,
-            self._backend,
+            self._build_system['build-backend'],
             backend_path=self._build_system.get('backend-path'),
+            runner=runner,
             python_executable=self._python_executable,
-            runner=self._runner,
         )
 
     @classmethod
     def from_isolated_env(
-        cls: type[_TProjectBuilder],
-        env: env.IsolatedEnv,
+        cls,
+        env: _env.IsolatedEnv,
         source_dir: StrPath,
-        runner: SubprocessRunner = pyproject_hooks.default_subprocess_runner,
-    ) -> _TProjectBuilder:
+        runner: pyproject_hooks.SubprocessRunner = pyproject_hooks.default_subprocess_runner,
+    ) -> Self:
         return cls(
             source_dir=source_dir,
             python_executable=env.python_executable,
@@ -207,7 +191,11 @@ class ProjectBuilder:
         """
         return set(self._build_system['requires'])
 
-    def get_requires_for_build(self, distribution: Distribution, config_settings: ConfigSettings | None = None) -> set[str]:
+    def get_requires_for_build(
+        self,
+        distribution: Distribution,
+        config_settings: ConfigSettings | None = None,
+    ) -> set[str]:
         """
         Return the dependencies defined by the backend in addition to
         :attr:`build_system_requires` for a given distribution.
@@ -216,7 +204,7 @@ class ProjectBuilder:
             (``sdist`` or ``wheel``)
         :param config_settings: Config settings for the build backend
         """
-        self.log(f'Getting build dependencies for {distribution}...')
+        _ctx.log(f'Getting build dependencies for {distribution}...')
         hook_name = f'get_requires_for_build_{distribution}'
         get_requires = getattr(self._hook, hook_name)
 
@@ -224,7 +212,9 @@ class ProjectBuilder:
             return set(get_requires(config_settings))
 
     def check_dependencies(
-        self, distribution: Distribution, config_settings: ConfigSettings | None = None
+        self,
+        distribution: Distribution,
+        config_settings: ConfigSettings | None = None,
     ) -> set[tuple[str, ...]]:
         """
         Return the dependencies which are not satisfied from the combined set of
@@ -236,27 +226,27 @@ class ProjectBuilder:
         :returns: Set of variable-length unmet dependency tuples
         """
         dependencies = self.get_requires_for_build(distribution, config_settings).union(self.build_system_requires)
-        return {u for d in dependencies for u in check_dependency(d)}
+        return {u for d in dependencies for u in _util.check_dependency(d)}
 
     def prepare(
         self,
         distribution: Distribution,
-        output_directory: StrPath,
+        output_dir: StrPath,
         config_settings: ConfigSettings | None = None,
     ) -> str | None:
         """
         Prepare metadata for a distribution.
 
         :param distribution: Distribution to build (must be ``wheel``)
-        :param output_directory: Directory to put the prepared metadata in
+        :param output_dir: Directory to put the prepared metadata in
         :param config_settings: Config settings for the build backend
         :returns: The full path to the prepared metadata directory
         """
-        self.log(f'Getting metadata for {distribution}...')
+        _ctx.log(f'Getting metadata for {distribution}...')
         try:
             return self._call_backend(
                 f'prepare_metadata_for_build_{distribution}',
-                output_directory,
+                output_dir,
                 config_settings,
                 _allow_fallback=False,
             )
@@ -268,42 +258,45 @@ class ProjectBuilder:
     def build(
         self,
         distribution: Distribution,
-        output_directory: StrPath,
+        output_dir: StrPath,
         config_settings: ConfigSettings | None = None,
-        metadata_directory: str | None = None,
+        metadata_dir: str | None = None,
     ) -> str:
         """
         Build a distribution.
 
         :param distribution: Distribution to build (``sdist`` or ``wheel``)
-        :param output_directory: Directory to put the built distribution in
+        :param output_dir: Directory to put the built distribution in
         :param config_settings: Config settings for the build backend
-        :param metadata_directory: If provided, should be the return value of a
+        :param metadata_dir: If provided, should be the return value of a
             previous ``prepare`` call on the same ``distribution`` kind
         :returns: The full path to the built distribution
         """
-        self.log(f'Building {distribution}...')
-        kwargs = {} if metadata_directory is None else {'metadata_directory': metadata_directory}
-        return self._call_backend(f'build_{distribution}', output_directory, config_settings, **kwargs)
+        _ctx.log(f'Building {distribution}...')
+        kwargs = {} if metadata_dir is None else {'metadata_dir': metadata_dir}
+        return self._call_backend(f'build_{distribution}', output_dir, config_settings, **kwargs)
 
-    def metadata_path(self, output_directory: StrPath) -> str:
+    def metadata_path(
+        self,
+        output_dir: StrPath,
+    ) -> str:
         """
         Generate the metadata directory of a distribution and return its path.
 
         If the backend does not support the ``prepare_metadata_for_build_wheel``
         hook, a wheel will be built and the metadata will be extracted from it.
 
-        :param output_directory: Directory to put the metadata distribution in
+        :param output_dir: Directory to put the metadata distribution in
         :returns: The path of the metadata directory
         """
         # prepare_metadata hook
-        metadata = self.prepare('wheel', output_directory)
+        metadata = self.prepare('wheel', output_dir)
         if metadata is not None:
             return metadata
 
         # fallback to build_wheel hook
-        wheel = self.build('wheel', output_directory)
-        match = parse_wheel_filename(os.path.basename(wheel))
+        wheel = self.build('wheel', output_dir)
+        match = _util.parse_wheel_filename(os.path.basename(wheel))
         if not match:
             msg = 'Invalid wheel'
             raise ValueError(msg)
@@ -311,10 +304,10 @@ class ProjectBuilder:
         member_prefix = f'{distinfo}/'
         with zipfile.ZipFile(wheel) as w:
             w.extractall(
-                output_directory,
+                output_dir,
                 (member for member in w.namelist() if member.startswith(member_prefix)),
             )
-        return os.path.join(output_directory, distinfo)
+        return os.path.join(output_dir, distinfo)
 
     def _call_backend(
         self, hook_name: str, outdir: StrPath, config_settings: ConfigSettings | None = None, **kwargs: Any
@@ -342,22 +335,10 @@ class ProjectBuilder:
         except pyproject_hooks.BackendUnavailable as exception:
             raise BuildBackendException(
                 exception,
-                f"Backend '{self._backend}' is not available.",
+                f"Backend '{self._hook.build_backend}' is not available.",
                 sys.exc_info(),
             ) from None
         except subprocess.CalledProcessError as exception:
             raise BuildBackendException(exception, f'Backend subprocess exited when trying to invoke {hook}') from None
         except Exception as exception:
             raise BuildBackendException(exception, exc_info=sys.exc_info()) from None
-
-    @staticmethod
-    def log(message: str) -> None:
-        """
-        Log a message.
-
-        The default implementation uses the logging module but this function can be
-        overridden by users to have a different implementation.
-
-        :param message: Message to output
-        """
-        _logger.log(logging.INFO, message, stacklevel=2)

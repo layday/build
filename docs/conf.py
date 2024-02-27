@@ -40,6 +40,7 @@ extensions = [
 
 intersphinx_mapping = {
     'python': ('https://docs.python.org/3/', None),
+    'pyproject-hooks': ('https://pyproject-hooks.readthedocs.io/en/latest/', None),
 }
 
 # Add any paths that contain templates here, relative to this directory.
@@ -74,3 +75,5 @@ nitpick_ignore = [
 
 
 issues_github_path = 'pypa/build'
+
+always_use_bars_union = True

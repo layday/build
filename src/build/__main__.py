@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import contextlib
 import os
-import platform
 import shutil
 import subprocess
 import sys
@@ -14,16 +13,16 @@ import textwrap
 import traceback
 import warnings
 
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from functools import partial
 from typing import NoReturn, TextIO
 
 import build
 
-from . import ProjectBuilder
-from ._exceptions import BuildBackendException, BuildException, FailedProcessError
+from . import ProjectBuilder, _ctx
+from . import env as _env
+from ._exceptions import BuildBackendException, BuildException, FailedProcessError, UnmetDependenciesError
 from ._types import ConfigSettings, Distribution, StrPath
-from .env import DefaultIsolatedEnv
 
 
 _COLORS = {
@@ -66,10 +65,32 @@ def _showwarning(
     _cprint('{yellow}WARNING{reset} {}', str(message))
 
 
-def _setup_cli() -> None:
+_max_terminal_width = min(shutil.get_terminal_size().columns - 2, 127)
+
+
+_fill = partial(textwrap.fill, width=_max_terminal_width)
+
+
+def _log_to_stdout(message: str, *, origin: _ctx.LogMessageOrigin = _ctx.LogMessageOrigin.Logging) -> None:
+    if origin is _ctx.LogMessageOrigin.Logging:
+        for idx, line in enumerate(message.splitlines()):
+            _cprint(
+                '{bold}{}{reset}',
+                _fill(line, initial_indent='* ' if idx == 0 else '  ', subsequent_indent='  '),
+            )
+    elif origin in {_ctx.LogMessageOrigin.CommandInput, _ctx.LogMessageOrigin.CommandOutput}:
+        initial_indent = '< ' if origin is _ctx.LogMessageOrigin.CommandOutput else '> '
+        for line in message.splitlines():
+            _cprint(
+                '{dim}{}{reset}',
+                _fill(line, initial_indent=initial_indent, subsequent_indent='  '),
+            )
+
+
+def _setup_cli(*, verbosity: int) -> None:
     warnings.showwarning = _showwarning
 
-    if platform.system() == 'Windows':
+    if sys.platform.startswith('win32'):
         try:
             import colorama
 
@@ -77,28 +98,13 @@ def _setup_cli() -> None:
         except ModuleNotFoundError:
             pass
 
+    _ctx.LOGGER.set(_log_to_stdout)
 
-def _error(msg: str, code: int = 1) -> NoReturn:  # pragma: no cover
-    """
-    Print an error message and exit. Will color the output when writing to a TTY.
+    _ctx.VERBOSITY.set(verbosity)
+    if _ctx.verbosity:
+        import logging
 
-    :param msg: Error message
-    :param code: Error code
-    """
-    _cprint('{red}ERROR{reset} {}', msg)
-    raise SystemExit(code)
-
-
-class _ProjectBuilder(ProjectBuilder):
-    @staticmethod
-    def log(message: str) -> None:
-        _cprint('{bold}* {}{reset}', message)
-
-
-class _DefaultIsolatedEnv(DefaultIsolatedEnv):
-    @staticmethod
-    def log(message: str) -> None:
-        _cprint('{bold}* {}{reset}', message)
+        logging.root.setLevel(logging.DEBUG if _ctx.verbosity > 1 else logging.INFO)
 
 
 def _format_dep_chain(dep_chain: Sequence[str]) -> str:
@@ -106,76 +112,82 @@ def _format_dep_chain(dep_chain: Sequence[str]) -> str:
 
 
 def _build_in_isolated_env(
-    srcdir: StrPath,
-    outdir: StrPath,
+    source_dir: StrPath,
     distribution: Distribution,
+    *,
+    output_dir: StrPath,
     config_settings: ConfigSettings | None,
+    env_impl: _env.EnvImpl | None,
 ) -> str:
-    with _DefaultIsolatedEnv() as env:
-        builder = _ProjectBuilder.from_isolated_env(env, srcdir)
+    with _env.DefaultIsolatedEnv(env_impl) as env:
+        builder = ProjectBuilder.from_isolated_env(env, source_dir)
         # first install the build dependencies
         env.install(builder.build_system_requires)
         # then get the extra required dependencies from the backend (which was installed in the call above :P)
         env.install(builder.get_requires_for_build(distribution, config_settings or {}))
-        return builder.build(distribution, outdir, config_settings or {})
+        return builder.build(distribution, output_dir, config_settings or {})
 
 
 def _build_in_current_env(
-    srcdir: StrPath,
-    outdir: StrPath,
+    source_dir: StrPath,
     distribution: Distribution,
+    *,
+    output_dir: StrPath,
     config_settings: ConfigSettings | None,
-    skip_dependency_check: bool = False,
+    skip_dependency_check: bool,
 ) -> str:
-    builder = _ProjectBuilder(srcdir)
+    builder = ProjectBuilder(source_dir)
 
     if not skip_dependency_check:
         missing = builder.check_dependencies(distribution, config_settings or {})
         if missing:
-            dependencies = ''.join('\n\t' + dep for deps in missing for dep in (deps[0], _format_dep_chain(deps[1:])) if dep)
-            _cprint()
-            _error(f'Missing dependencies:{dependencies}')
+            raise UnmetDependenciesError(missing)
 
-    return builder.build(distribution, outdir, config_settings or {})
-
-
-def _build(
-    isolation: bool,
-    srcdir: StrPath,
-    outdir: StrPath,
-    distribution: Distribution,
-    config_settings: ConfigSettings | None,
-    skip_dependency_check: bool,
-) -> str:
-    if isolation:
-        return _build_in_isolated_env(srcdir, outdir, distribution, config_settings)
-    else:
-        return _build_in_current_env(srcdir, outdir, distribution, config_settings, skip_dependency_check)
+    return builder.build(distribution, output_dir, config_settings or {})
 
 
 @contextlib.contextmanager
 def _handle_build_error() -> Iterator[None]:
+    def error(msg: str, code: int = 1) -> NoReturn:  # pragma: no cover
+        """
+        Print an error message and exit. Will color the output when writing to a TTY.
+
+        :param msg: Error message
+        :param code: Error code
+        """
+        _cprint('{red}ERROR{reset} {}', msg)
+        raise SystemExit(code)
+
     try:
         yield
+
+    except UnmetDependenciesError as e:
+        dependencies = ''.join(
+            '\n\t' + dep for deps in e.unmet_dependencies for dep in (deps[0], _format_dep_chain(deps[1:])) if dep
+        )
+        _cprint()
+        error('Missing dependencies:' + dependencies)
+
     except (BuildException, FailedProcessError) as e:
-        _error(str(e))
+        error(str(e))
+
     except BuildBackendException as e:
         if isinstance(e.exception, subprocess.CalledProcessError):
             _cprint()
-            _error(str(e))
+            error(str(e))
 
         if e.exc_info:
-            tb_lines = traceback.format_exception(
-                e.exc_info[0],
-                e.exc_info[1],
-                e.exc_info[2],
-                limit=-1,
-            )
+            tb_lines = traceback.format_exception(e.exc_info[0], e.exc_info[1], e.exc_info[2], limit=-1)
             tb = ''.join(tb_lines)
         else:
             tb = traceback.format_exc(-1)
         _cprint('\n{dim}{}{reset}\n', tb.strip('\n'))
-        _error(str(e))
+        error(str(e))
+
+    except Exception as e:  # pragma: no cover
+        tb = traceback.format_exc().strip('\n')
+        _cprint('\n{dim}{}{reset}\n', tb)
+        error(str(e))
 
 
 def _natural_language_list(elements: Sequence[str]) -> str:
@@ -192,47 +204,31 @@ def _natural_language_list(elements: Sequence[str]) -> str:
 
 
 def build_package(
-    srcdir: StrPath,
-    outdir: StrPath,
-    distributions: Sequence[Distribution],
-    config_settings: ConfigSettings | None = None,
-    isolation: bool = True,
-    skip_dependency_check: bool = False,
+    source_dir: StrPath,
+    distributions: Sequence[str],
+    build: Callable[[StrPath, str], str],
 ) -> Sequence[str]:
     """
     Run the build process.
 
-    :param srcdir: Source directory
-    :param outdir: Output directory
+    :param source_dir: Source directory
     :param distribution: Distribution to build (sdist or wheel)
-    :param config_settings: Configuration settings to be passed to the backend
-    :param isolation: Isolate the build in a separate environment
-    :param skip_dependency_check: Do not perform the dependency check
+    :param build: Builder callback
     """
-    built: list[str] = []
-    for distribution in distributions:
-        out = _build(isolation, srcdir, outdir, distribution, config_settings, skip_dependency_check)
-        built.append(os.path.basename(out))
-    return built
+    return [os.path.basename(build(source_dir, d)) for d in distributions]
 
 
 def build_package_via_sdist(
-    srcdir: StrPath,
-    outdir: StrPath,
-    distributions: Sequence[Distribution],
-    config_settings: ConfigSettings | None = None,
-    isolation: bool = True,
-    skip_dependency_check: bool = False,
+    source_dir: StrPath,
+    distributions: Sequence[str],
+    build: Callable[[StrPath, str], str],
 ) -> Sequence[str]:
     """
     Build a sdist and then the specified distributions from it.
 
-    :param srcdir: Source directory
-    :param outdir: Output directory
+    :param source_dir: Source directory
     :param distribution: Distribution to build (only wheel)
-    :param config_settings: Configuration settings to be passed to the backend
-    :param isolation: Isolate the build in a separate environment
-    :param skip_dependency_check: Do not perform the dependency check
+    :param build: Builder callback
     """
     from ._compat import tarfile
 
@@ -240,24 +236,41 @@ def build_package_via_sdist(
         msg = 'Only binary distributions are allowed but sdist was specified'
         raise ValueError(msg)
 
-    sdist = _build(isolation, srcdir, outdir, 'sdist', config_settings, skip_dependency_check)
+    sdist = build(source_dir, 'sdist')
 
     sdist_name = os.path.basename(sdist)
-    sdist_out = tempfile.mkdtemp(prefix='build-via-sdist-')
-    built: list[str] = []
+    built = [sdist_name]
+
     if distributions:
         # extract sdist
-        with tarfile.TarFile.open(sdist) as t:
-            t.extractall(sdist_out)
-            try:
-                _ProjectBuilder.log(f'Building {_natural_language_list(distributions)} from sdist')
-                srcdir = os.path.join(sdist_out, sdist_name[: -len('.tar.gz')])
-                for distribution in distributions:
-                    out = _build(isolation, srcdir, outdir, distribution, config_settings, skip_dependency_check)
-                    built.append(os.path.basename(out))
-            finally:
-                shutil.rmtree(sdist_out, ignore_errors=True)
-    return [sdist_name, *built]
+        with tempfile.TemporaryDirectory(prefix='build-via-sdist-') as sdist_dir, \
+                tarfile.TarFile.open(sdist) as sdist_tar:  # fmt: skip
+            sdist_tar.extractall(sdist_dir)
+
+            _ctx.log(f'Preparing to build {_natural_language_list(distributions)} from sdist')
+
+            source_dir = os.path.join(sdist_dir, sdist_name[: -len('.tar.gz')])
+            for distribution in distributions:
+                out = build(source_dir, distribution)
+                built.append(os.path.basename(out))
+
+    return built
+
+
+def _map_config_settings(config_settings_list: list[str] | None) -> ConfigSettings:
+    config_settings: dict[str, str | list[str]] = {}
+
+    if config_settings_list:
+        for arg in config_settings_list:
+            setting, _, value = arg.partition('=')
+            if setting not in config_settings:
+                config_settings[setting] = value
+            elif isinstance((existing_setting := config_settings[setting]), list):
+                existing_setting.append(value)
+            else:
+                config_settings[setting] = [setting]
+
+    return config_settings
 
 
 def main_parser() -> argparse.ArgumentParser:
@@ -287,7 +300,7 @@ def main_parser() -> argparse.ArgumentParser:
             argparse.RawDescriptionHelpFormatter,
             # Prevent argparse from taking up the entire width of the terminal window
             # which impedes readability.
-            width=min(shutil.get_terminal_size().columns - 2, 127),
+            width=_max_terminal_width,
         ),
     )
     parser.add_argument(
@@ -304,15 +317,26 @@ def main_parser() -> argparse.ArgumentParser:
         version=f"build {build.__version__} ({','.join(build.__path__)})",
     )
     parser.add_argument(
+        '--verbose',
+        '-v',
+        action='count',
+        default=0,
+        help='increase verbosity',
+    )
+    parser.add_argument(
         '--sdist',
         '-s',
-        action='store_true',
+        dest='distributions',
+        action='append_const',
+        const='sdist',
         help='build a source distribution (disables the default behavior)',
     )
     parser.add_argument(
         '--wheel',
         '-w',
-        action='store_true',
+        dest='distributions',
+        action='append_const',
+        const='wheel',
         help='build a wheel (disables the default behavior)',
     )
     parser.add_argument(
@@ -328,16 +352,24 @@ def main_parser() -> argparse.ArgumentParser:
         action='store_true',
         help='do not check that build dependencies are installed',
     )
-    parser.add_argument(
+    env_group = parser.add_mutually_exclusive_group()
+    env_group.add_argument(
         '--no-isolation',
         '-n',
         action='store_true',
         help='disable building the project in an isolated virtual environment. '
         'Build dependencies must be installed separately when this option is used',
     )
+    env_group.add_argument(
+        '--env-impl',
+        choices=_env.ENV_IMPLS,
+        help='isolated environment implementation to use.  Defaults to virtualenv if installed, '
+        ' otherwise venv.  uv support is experimental.',
+    )
     parser.add_argument(
         '--config-setting',
         '-C',
+        dest='config_settings',
         action='append',
         help='settings to pass to the backend.  Multiple settings can be provided. '
         'Settings beginning with a hyphen will erroneously be interpreted as options to build if separated '
@@ -354,52 +386,48 @@ def main(cli_args: Sequence[str], prog: str | None = None) -> None:
     :param cli_args: CLI arguments
     :param prog: Program name to show in help text
     """
-    _setup_cli()
+
     parser = main_parser()
     if prog:
         parser.prog = prog
     args = parser.parse_args(cli_args)
 
-    distributions: list[Distribution] = []
-    config_settings = {}
+    _setup_cli(verbosity=args.verbose)
 
-    if args.config_setting:
-        for arg in args.config_setting:
-            setting, _, value = arg.partition('=')
-            if setting not in config_settings:
-                config_settings[setting] = value
-            else:
-                if not isinstance(config_settings[setting], list):
-                    config_settings[setting] = [config_settings[setting]]
+    build = partial(
+        partial(
+            _build_in_current_env,
+            skip_dependency_check=args.skip_dependency_check,
+        )
+        if args.no_isolation
+        else partial(
+            _build_in_isolated_env,
+            env_impl=args.env_impl,
+        ),
+        # outdir is relative to srcdir only if omitted.
+        output_dir=os.path.join(args.srcdir, 'dist') if args.outdir is None else args.outdir,
+        config_settings=_map_config_settings(args.config_settings),
+    )
+    build_all = partial(
+        partial(
+            build_package,
+            distributions=args.distributions,
+        )
+        if args.distributions
+        else partial(
+            build_package_via_sdist,
+            distributions=['wheel'],
+        ),
+        args.srcdir,
+        build=build,
+    )
 
-                config_settings[setting].append(value)
-
-    if args.sdist:
-        distributions.append('sdist')
-    if args.wheel:
-        distributions.append('wheel')
-
-    # outdir is relative to srcdir only if omitted.
-    outdir = os.path.join(args.srcdir, 'dist') if args.outdir is None else args.outdir
-
-    if distributions:
-        build_call = build_package
-    else:
-        build_call = build_package_via_sdist
-        distributions = ['wheel']
-    try:
-        with _handle_build_error():
-            built = build_call(
-                args.srcdir, outdir, distributions, config_settings, not args.no_isolation, args.skip_dependency_check
-            )
-            artifact_list = _natural_language_list(
-                ['{underline}{}{reset}{bold}{green}'.format(artifact, **_STYLES) for artifact in built]
-            )
-            _cprint('{bold}{green}Successfully built {}{reset}', artifact_list)
-    except Exception as e:  # pragma: no cover
-        tb = traceback.format_exc().strip('\n')
-        _cprint('\n{dim}{}{reset}\n', tb)
-        _error(str(e))
+    with _handle_build_error():
+        built = build_all()
+        artifact_list = _natural_language_list(
+            ['{underline}{}{reset}{bold}{green}'.format(artifact, **_STYLES) for artifact in built]
+        )
+        _cprint('{bold}{green}Successfully built {}{reset}', artifact_list)
 
 
 def entrypoint() -> None:

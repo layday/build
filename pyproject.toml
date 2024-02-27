@@ -37,7 +37,7 @@ dependencies = [
   "pyproject_hooks",
   # not actually a runtime dependency, only supplied as there is not "recommended dependency" support
   'colorama; os_name == "nt"',
-  'importlib-metadata >= 4.6; python_full_version < "3.10.2"',  # Not required for 3.8+, but fixes a stdlib bug
+  'importlib-metadata >= 4.6; python_full_version < "3.10.2"', # Not required for 3.8+, but fixes a stdlib bug
   'tomli >= 1.1.0; python_version < "3.11"',
 ]
 
@@ -46,7 +46,7 @@ docs = [
   "furo >= 2023.08.17",
   "sphinx ~= 7.0",
   "sphinx-argparse-cli >= 1.5",
-  "sphinx-autodoc-typehints >= 1.10",
+  "sphinx-autodoc-typehints >= 2",
   "sphinx-issues >= 3.0.0",
 ]
 test = [
@@ -71,6 +71,9 @@ typing = [
 virtualenv = [
   "virtualenv >= 20.0.35",
 ]
+uv = [
+  "uv",
+]
 
 [project.scripts]
 pyproject-build = "build.__main__:entrypoint"
@@ -79,8 +82,20 @@ pyproject-build = "build.__main__:entrypoint"
 build = "build.__main__:entrypoint"
 
 [tool.flit.sdist]
-include = ["tests/", ".gitignore", "CHANGELOG.rst", "docs/", ".dockerignore", "tox.ini"]
-exclude = ["**/__pycache__", "docs/_build", "**/*.egg-info", "tests/packages/*/build"]
+include = [
+  ".dockerignore",
+  ".gitignore",
+  "CHANGELOG.rst",
+  "docs/",
+  "tests/",
+  "tox.ini",
+]
+exclude = [
+  "**/__pycache__",
+  "**/*.egg-info",
+  "docs/_build",
+  "tests/packages/*/build",
+]
 
 
 [tool.coverage.run]
@@ -135,7 +150,6 @@ enable_error_code = ["ignore-without-code", "truthy-bool", "redundant-expr"]
 [[tool.mypy.overrides]]
 module = [
   "colorama",   # Optional dependency
-  "pyproject_hooks.*",   # Untyped
   "virtualenv", # Optional dependency
 ]
 ignore_missing_imports = true
@@ -150,17 +164,17 @@ quote-style = "single"
 
 [tool.ruff.lint]
 extend-select = [
-  "B",    # flake8-bugbear
-  "C4",   # flake8-comprehensions
-  "C9",   # mccabe
-  "I",    # isort
-  "PGH",  # pygrep-hooks
-  "RUF",  # ruff
-  "UP",   # pyupgrade
-  "W",    # pycodestyle
-  "YTT",  # flake8-2020
-  "TRY",  # tryceratops
-  "EM",   # flake8-errmsg
+  "B",   # flake8-bugbear
+  "C4",  # flake8-comprehensions
+  "C9",  # mccabe
+  "I",   # isort
+  "PGH", # pygrep-hooks
+  "RUF", # ruff
+  "UP",  # pyupgrade
+  "W",   # pycodestyle
+  "YTT", # flake8-2020
+  "TRY", # tryceratops
+  "EM",  # flake8-errmsg
 ]
 
 [tool.ruff.lint.mccabe]
@@ -172,7 +186,7 @@ lines-after-imports = 2
 
 [tool.check-wheel-contents]
 ignore = [
-  "W005",  # We _are_ build
+  "W005", # We _are_ build
 ]
 
 [tool.bumpversion]

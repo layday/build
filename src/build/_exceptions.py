@@ -67,6 +67,11 @@ class FailedProcessError(Exception):
         return description
 
 
+class UnmetDependenciesError(Exception):
+    def __init__(self, unmet_dependencies: set[tuple[str, ...]]) -> None:
+        self.unmet_dependencies = unmet_dependencies
+
+
 class TypoWarning(Warning):
     """
     Warning raised when a possible typo is found.

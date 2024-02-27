@@ -229,15 +229,15 @@ def test_build_package_via_sdist_invalid_distribution(tmp_dir, package_test_setu
         pytest.param(
             [],
             [
-                '* Creating venv isolated environment...',
-                '* Installing packages in isolated environment... (setuptools >= 42.0.0)',
+                '* Creating isolated environment: venv...',
+                '* Installing packages in isolated environment:\n -setuptools >= 42.0.0',
                 '* Getting build dependencies for sdist...',
                 '* Building sdist...',
                 '* Building wheel from sdist',
-                '* Creating venv isolated environment...',
-                '* Installing packages in isolated environment... (setuptools >= 42.0.0)',
+                '* Creating isolated environment: venv...',
+                '* Installing packages in isolated environment:\n -setuptools >= 42.0.0',
                 '* Getting build dependencies for wheel...',
-                '* Installing packages in isolated environment... (wheel)',
+                '* Installing packages in isolated environment:\n -wheel',
                 '* Building wheel...',
                 'Successfully built test_setuptools-1.0.0.tar.gz and test_setuptools-1.0.0-py2.py3-none-any.whl',
             ],
@@ -259,10 +259,10 @@ def test_build_package_via_sdist_invalid_distribution(tmp_dir, package_test_setu
         pytest.param(
             ['--wheel'],
             [
-                '* Creating venv isolated environment...',
-                '* Installing packages in isolated environment... (setuptools >= 42.0.0)',
+                '* Creating isolated environment: venv...',
+                '* Installing packages in isolated environment:\n -setuptools >= 42.0.0',
                 '* Getting build dependencies for wheel...',
-                '* Installing packages in isolated environment... (wheel)',
+                '* Installing packages in isolated environment:\n -wheel',
                 '* Building wheel...',
                 'Successfully built test_setuptools-1.0.0-py2.py3-none-any.whl',
             ],
@@ -323,8 +323,8 @@ def main_reload_styles():
             False,
             'ERROR ',
             [
-                '* Creating venv isolated environment...',
-                '* Installing packages in isolated environment... (setuptools >= 42.0.0, this is invalid)',
+                '* Creating isolated environment: venv...',
+                '* Installing packages in isolated environment:\n -setuptools >= 42.0.0\n-this is invalid',
                 '',
                 'Traceback (most recent call last):',
             ],
@@ -333,8 +333,8 @@ def main_reload_styles():
             True,
             '\33[91mERROR\33[0m ',
             [
-                '\33[1m* Creating venv isolated environment...\33[0m',
-                '\33[1m* Installing packages in isolated environment... (setuptools >= 42.0.0, this is invalid)\33[0m',
+                '\33[1m* Creating isolated environment: venv...\33[0m',
+                '\33[1m* Installing packages in isolated environment:\n -setuptools >= 42.0.0\n-this is invalid\33[0m',
                 '',
                 '\33[2mTraceback (most recent call last):',
             ],
@@ -432,7 +432,7 @@ def test_venv_fail(monkeypatch, package_test_flit, tmp_dir, capsys):
     assert (
         stdout
         == """\
-* Creating venv isolated environment...
+* Creating isolated environment: venv...
 ERROR Failed to create venv. Maybe try installing virtualenv.
   Command 'test args' failed with return code 1
   stdout:

@@ -22,11 +22,11 @@ def check_dependency(
     :param parent_extras: Extras (eg. "test" in myproject[test])
     :yields: Unmet dependencies
     """
-    import packaging.requirements
+    from packaging.requirements import Requirement
 
     from ._compat import importlib
 
-    req = packaging.requirements.Requirement(req_string)
+    req = Requirement(req_string)
     normalised_req_string = str(req)
 
     # ``Requirement`` doesn't implement ``__eq__`` so we cannot compare reqs for
