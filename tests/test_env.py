@@ -69,9 +69,9 @@ def test_venv_executable_missing_post_creation(
 @typing.no_type_check
 def test_isolated_env_abstract():
     with pytest.raises(TypeError):
-        build.env.IsolatedEnv()
+        build.env.BuildEnv()
 
-    class PartialEnv(build.env.IsolatedEnv):
+    class PartialEnv(build.env.BuildEnv):
         @property
         def executable(self):
             raise NotImplementedError
@@ -79,7 +79,7 @@ def test_isolated_env_abstract():
     with pytest.raises(TypeError):
         PartialEnv()
 
-    class PartialEnv(build.env.IsolatedEnv):
+    class PartialEnv(build.env.BuildEnv):
         def make_extra_environ(self):
             raise NotImplementedError
 
@@ -96,7 +96,7 @@ def test_isolated_env_log(
     mocker.patch('build.env.run_subprocess')
 
     with build.env.DefaultIsolatedEnv() as env:
-        env.install(['something'])
+        env.install_requirements(['something'])
 
     assert [(record.levelname, record.message) for record in caplog.records] == [
         ('INFO', 'Creating isolated environment: venv+pip...'),
@@ -168,10 +168,10 @@ def test_install_short_circuits(
     with build.env.DefaultIsolatedEnv() as env:
         install_requirements = mocker.patch.object(env._env_backend, 'install_requirements')
 
-        env.install([])
+        env.install_requirements([])
         install_requirements.assert_not_called()
 
-        env.install(['foo'])
+        env.install_requirements(['foo'])
         install_requirements.assert_called_once()
 
 
@@ -186,7 +186,7 @@ def test_default_impl_install_cmd_well_formed(
     with build.env.DefaultIsolatedEnv() as env:
         run_subprocess = mocker.patch('build.env.run_subprocess')
 
-        env.install(['some', 'requirements'])
+        env.install_requirements(['some', 'requirements'])
 
         run_subprocess.assert_called_once_with(
             [
@@ -215,7 +215,7 @@ def test_uv_impl_install_cmd_well_formed(
     with build.env.DefaultIsolatedEnv(installer='uv') as env:
         run_subprocess = mocker.patch('build.env.run_subprocess')
 
-        env.install(['some', 'requirements'])
+        env.install_requirements(['some', 'requirements'])
 
         (install_call,) = run_subprocess.call_args_list
         assert len(install_call.args) == 1
@@ -263,7 +263,7 @@ def test_requirement_installation(
     installer: build.env.Installer,
 ):
     with build.env.DefaultIsolatedEnv(installer=installer) as env:
-        env.install([f'test-flit @ {Path(package_test_flit).as_uri()}'])
+        env.install_requirements([f'test-flit @ {Path(package_test_flit).as_uri()}'])
 
 
 def test_external_uv_detection_success(

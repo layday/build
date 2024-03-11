@@ -10,8 +10,8 @@ import sys
 import warnings
 import zipfile
 
-from collections.abc import Iterator
-from typing import Any, Mapping, Sequence, TypeVar
+from collections.abc import Iterator, Mapping, Sequence
+from typing import Any
 
 import pyproject_hooks
 
@@ -25,9 +25,6 @@ from ._exceptions import (
 )
 from ._types import ConfigSettings, Distribution, StrPath, SubprocessRunner
 from ._util import check_dependency, parse_wheel_filename
-
-
-_TProjectBuilder = TypeVar('_TProjectBuilder', bound='ProjectBuilder')
 
 
 _DEFAULT_BACKEND = {
@@ -115,11 +112,14 @@ def _parse_build_system_table(pyproject_toml: Mapping[str, Any]) -> Mapping[str,
     return build_system_table
 
 
-def _wrap_subprocess_runner(runner: SubprocessRunner, env: env.IsolatedEnv) -> SubprocessRunner:
-    def _invoke_wrapped_runner(cmd: Sequence[str], cwd: str | None, extra_environ: Mapping[str, str] | None) -> None:
-        runner(cmd, cwd, {**(env.make_extra_environ() or {}), **(extra_environ or {})})
+def _wrap_subprocess_runner(env: env.BuildEnv) -> SubprocessRunner:
+    def run(cmd: Sequence[str], cwd: str | None, extra_environ: Mapping[str, str] | None) -> None:
+        env.run_hook(cmd, cwd, extra_env=extra_environ or {})
 
-    return _invoke_wrapped_runner
+    return run
+
+
+_exposed_env = env.DefaultExposedEnv()
 
 
 class ProjectBuilder:
@@ -130,8 +130,8 @@ class ProjectBuilder:
     def __init__(
         self,
         source_dir: StrPath,
-        python_executable: str = sys.executable,
-        runner: SubprocessRunner = pyproject_hooks.default_subprocess_runner,
+        *,
+        env: env.BuildEnv = _exposed_env,
     ) -> None:
         """
         :param source_dir: The source directory
@@ -150,11 +150,11 @@ class ProjectBuilder:
         The default runner simply calls the backend hooks in a subprocess, writing backend output
         to stdout/stderr.
         """
+
         self._source_dir: str = os.path.abspath(source_dir)
         _validate_source_directory(source_dir)
 
-        self._python_executable = python_executable
-        self._runner = runner
+        self._env = env
 
         pyproject_toml_path = os.path.join(source_dir, 'pyproject.toml')
         self._build_system = _parse_build_system_table(_read_pyproject_toml(pyproject_toml_path))
@@ -165,21 +165,8 @@ class ProjectBuilder:
             self._source_dir,
             self._backend,
             backend_path=self._build_system.get('backend-path'),
-            python_executable=self._python_executable,
-            runner=self._runner,
-        )
-
-    @classmethod
-    def from_isolated_env(
-        cls: type[_TProjectBuilder],
-        env: env.IsolatedEnv,
-        source_dir: StrPath,
-        runner: SubprocessRunner = pyproject_hooks.default_subprocess_runner,
-    ) -> _TProjectBuilder:
-        return cls(
-            source_dir=source_dir,
-            python_executable=env.python_executable,
-            runner=_wrap_subprocess_runner(runner, env),
+            python_executable=self._env.python_executable,
+            runner=_wrap_subprocess_runner(env),
         )
 
     @property
@@ -192,7 +179,7 @@ class ProjectBuilder:
         """
         The Python executable used to invoke the backend.
         """
-        return self._python_executable
+        return self._env.python_executable
 
     @property
     def build_system_requires(self) -> set[str]:

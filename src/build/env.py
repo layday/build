@@ -12,7 +12,7 @@ import sysconfig
 import tempfile
 import typing
 
-from collections.abc import Collection, Mapping
+from collections.abc import Collection, Mapping, Sequence
 
 from . import _ctx
 from ._ctx import run_subprocess
@@ -25,40 +25,40 @@ Installer = typing.Literal['pip', 'uv']
 INSTALLERS = typing.get_args(Installer)
 
 
-class IsolatedEnv(typing.Protocol):
-    """Isolated build environment ABC."""
+class BuildEnv(typing.Protocol):
+    """Build environment interface."""
 
     @property
     @abc.abstractmethod
     def python_executable(self) -> str:
-        """The Python executable of the isolated environment."""
+        """The Python executable of the build environment."""
 
     @abc.abstractmethod
-    def make_extra_environ(self) -> Mapping[str, str] | None:
-        """Generate additional env vars specific to the isolated environment."""
+    def run_hook(self, cmd: Sequence[str], cwd: str | None = None, extra_env: Mapping[str, str] = {}) -> None:
+        """Run a build hook in a subprocess."""
 
 
-def _has_dependency(name: str, minimum_version_str: str | None = None, /, **distargs: object) -> bool | None:
-    """
-    Given a path, see if a package is present and return True if the version is
-    sufficient for build, False if it is not, None if the package is missing.
-    """
-    from packaging.version import Version
+class DefaultExposedEnv(BuildEnv):
+    def __init__(
+        self,
+        *,
+        python_executable: str = sys.executable,
+    ) -> None:
+        self._python_executable = python_executable
 
-    from ._compat import importlib
+    @property
+    def python_executable(self) -> str:
+        return self._python_executable
 
-    try:
-        distribution = next(iter(importlib.metadata.distributions(name=name, **distargs)))
-    except StopIteration:
-        return None
+    @_ctx.with_new_context
+    def run_hook(self, cmd: Sequence[str], cwd: str | None = None, extra_env: Mapping[str, str] = {}) -> None:
+        if not _ctx.verbosity:
+            _ctx.VERBOSITY.set(_is_build_hook_cmd(cmd))
 
-    if minimum_version_str is None:
-        return True
-
-    return Version(distribution.version) >= Version(minimum_version_str)
+        run_subprocess(cmd, cwd=cwd, extra_env=extra_env)
 
 
-class DefaultIsolatedEnv(IsolatedEnv):
+class DefaultIsolatedEnv(BuildEnv):
     """
     Isolated environment which supports several different underlying implementations.
     """
@@ -109,18 +109,10 @@ class DefaultIsolatedEnv(IsolatedEnv):
 
     @property
     def python_executable(self) -> str:
-        """The python executable of the isolated build environment."""
+        """The Python executable of the isolated build environment."""
         return self._env_backend.python_executable
 
-    def make_extra_environ(self) -> dict[str, str]:
-        path = os.environ.get('PATH')
-        return {
-            'PATH': os.pathsep.join([self._env_backend.scripts_dir, path])
-            if path is not None
-            else self._env_backend.scripts_dir
-        }
-
-    def install(self, requirements: Collection[str]) -> None:
+    def install_requirements(self, requirements: Collection[str]) -> None:
         """
         Install packages from PEP 508 requirements in the isolated build environment.
 
@@ -134,6 +126,28 @@ class DefaultIsolatedEnv(IsolatedEnv):
 
         _ctx.log('Installing packages in isolated environment:\n' + '\n'.join(f'- {r}' for r in sorted(requirements)))
         self._env_backend.install_requirements(requirements)
+
+    @_ctx.with_new_context
+    def run_hook(self, cmd: Sequence[str], cwd: str | None = None, extra_env: Mapping[str, str] = {}) -> None:
+        if not _ctx.verbosity:
+            _ctx.VERBOSITY.set(_is_build_hook_cmd(cmd))
+
+        run_subprocess(
+            cmd,
+            cwd=cwd,
+            extra_env={
+                'PATH': (
+                    os.pathsep.join([self._env_backend.scripts_dir, path])
+                    if (path := os.environ.get('PATH')) is not None
+                    else self._env_backend.scripts_dir
+                ),
+                **extra_env,
+            },
+        )
+
+
+def _is_build_hook_cmd(cmd: Sequence[str]) -> bool:
+    return bool(set(cmd) & {'build_sdist', 'build_wheel'})
 
 
 class _EnvBackend(typing.Protocol):  # pragma: no cover
@@ -299,11 +313,31 @@ class _UvBackend(_EnvBackend):
         if _ctx.verbosity > 1:
             # uv doesn't support doubling up -v unlike pip.
             cmd += ['-v']
-        run_subprocess([*cmd, 'install', *requirements], env={**os.environ, 'VIRTUAL_ENV': self._env_path})
+        run_subprocess([*cmd, 'install', *requirements], extra_env={'VIRTUAL_ENV': self._env_path})
 
     @property
     def display_name(self) -> str:
         return 'venv+uv'
+
+
+def _has_dependency(name: str, minimum_version_str: str | None = None, /, **distargs: object) -> bool | None:
+    """
+    Given a path, see if a package is present and return True if the version is
+    sufficient for build, False if it is not, None if the package is missing.
+    """
+    from packaging.version import Version
+
+    from ._compat import importlib
+
+    try:
+        distribution = next(iter(importlib.metadata.distributions(name=name, **distargs)))
+    except StopIteration:
+        return None
+
+    if minimum_version_str is None:
+        return True
+
+    return Version(distribution.version) >= Version(minimum_version_str)
 
 
 @functools.lru_cache(maxsize=None)
@@ -368,6 +402,6 @@ def _find_executable_and_scripts(path: str) -> tuple[str, str, str]:
 
 
 __all__ = [
-    'IsolatedEnv',
+    'BuildEnv',
     'DefaultIsolatedEnv',
 ]
